@@ -502,9 +502,13 @@ func (b *IdentityProvider) fetchDiscordGuildMemberInfo(authToken string, guildID
 		return nil, err
 	}
 
+	b.logger.Info(fmt.Sprint(guilds))
+
 	for _, guild := range guilds {
 		memberRoles := guild["roles"].([]string)
-		data.Groups = append(data.Groups, fmt.Sprintf("discord.com/%s/roles/", memberRoles))
+		for _, role := range memberRoles {
+			data.Groups = append(data.Groups, fmt.Sprintf("discord.com/%s/roles/%s", guildID, role))
+		}
 	}
 
 	b.logger.Debug(
