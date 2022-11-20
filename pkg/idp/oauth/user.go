@@ -32,6 +32,11 @@ type userData struct {
 	Groups []string `json:"groups,omitempty"`
 }
 
+type discordUserData struct {
+	userData userData
+	Guilds []string
+}
+
 func (b *IdentityProvider) fetchGithubUserInfo(params map[string]interface{}) (*userData, error) {
 	var req *http.Request
 	var reqMethod, reqURL, authToken string
@@ -340,7 +345,7 @@ func (b *IdentityProvider) fetchClaims(tokenData map[string]interface{}) (map[st
 			m["email"] = data["email"]
 		}
 		if b.ScopeExists("guilds") {
-			userData, err := b.fetchDiscordGuilds(tokenString)
+			discordData, err := b.fetchDiscordGuilds(tokenString)
 			if err != nil {
 				b.logger.Error(
 					"Failed extracting user guild data",
@@ -348,8 +353,12 @@ func (b *IdentityProvider) fetchClaims(tokenData map[string]interface{}) (map[st
 					zap.Error(err),
 				)
 			} else {
-				userGroups = append(userGroups, userData.Groups...)
-			}
+				userGroups = append(userGroups, discordData.userData.Groups...)
+
+				for _, guild := range discordData.Guilds {
+					discordMemberGuildInfo, _ := b.fetchDiscordGuildMemberInfo(tokenString, guild)
+					userGroups = append(userGroups, discordMemberGuildInfo.Groups...)
+				}
 		}
 		b.logger.Debug(
 			"Extracted UserInfo endpoint data",
@@ -371,10 +380,13 @@ func (b *IdentityProvider) fetchClaims(tokenData map[string]interface{}) (map[st
 	return m, nil
 }
 
-func (b *IdentityProvider) fetchDiscordGuilds(authToken string) (*userData, error) {
+func (b *IdentityProvider) fetchDiscordGuilds(authToken string) (*discordUserData, error) {
 	var req *http.Request
 	reqURL := "https://discord.com/api/v10/users/@me/guilds"
-	data := &userData{}
+	data := &discordUserData{
+		userData: userData{},
+		Guilds: []string{},
+	}
 
 	// Create new http client instance.
 	cli, err := b.newBrowser()
@@ -425,6 +437,8 @@ func (b *IdentityProvider) fetchDiscordGuilds(authToken string) (*userData, erro
 			continue
 		}
 
+		data.Guilds = append(data.Guilds, guildID)
+
 		// Check if the user has special permissions
 		if _, exists := guild["permissions"]; exists {
 			perm, err := strconv.Atoi(guild["permissions"].(string))
@@ -432,11 +446,65 @@ func (b *IdentityProvider) fetchDiscordGuilds(authToken string) (*userData, erro
 				continue
 			}
 			if (perm & 0x08) == 0x08 { // Check for admin privileges
-				data.Groups = append(data.Groups, fmt.Sprintf("discord.com/%s/admins", guildID))
+				data.userData.Groups = append(data.userData.Groups, fmt.Sprintf("discord.com/%s/admins", guildID))
 			}
 		}
 
-		data.Groups = append(data.Groups, fmt.Sprintf("discord.com/%s/members", guildID))
+		data.userData.Groups = append(data.userData.Groups, fmt.Sprintf("discord.com/%s/members", guildID))
+	}
+
+	b.logger.Debug(
+		"Parsed additional user data",
+		zap.String("url", reqURL),
+		zap.Any("data", data),
+	)
+
+	return data, nil
+}
+
+func (b *IdentityProvider) fetchDiscordGuildMemberInfo(authToken string, guildID string) (*userData, error) {
+	var req *http.Request
+	reqURL := fmt.Sprintf("https://discord.com/api/v10/users/@me/%s/member", guildID)
+	data := &userData{}
+
+	// Create new http client instance.
+	cli, err := b.newBrowser()
+	if err != nil {
+		return nil, err
+	}
+
+	req, err = http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Add("Authorization", "Bearer " + authToken)
+
+	// Fetch data from the URL.
+	resp, err := cli.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	respBody, err := ioutil.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	b.logger.Debug(
+		"Received user guild infomation",
+		zap.String("url", reqURL),
+		zap.Any("body", respBody),
+	)
+
+	guilds := []map[string]interface{}{}
+	if err := json.Unmarshal(respBody, &guilds); err != nil {
+		return nil, err
+	}
+
+	for _, guild := range guilds {
+		memberRoles := guild["roles"].([]string)
+		data.Groups = append(data.Groups, fmt.Sprintf("discord.com/%s/roles/", memberRoles))
 	}
 
 	b.logger.Debug(
